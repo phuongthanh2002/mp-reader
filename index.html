@@ -1,0 +1,282 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="Đọc file dump MicroProfiler của Roblox ngay trong trình duyệt: phát hiện vấn đề, so sánh trước/sau, xem từng frame, cây lời gọi, kèm giải thích tiếng Việt.">
+<title>MicroProfiler Reader</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=Space+Grotesk:wght@500;700&display=swap">
+<style>
+/* Layout: one instrument panel — findings and summary on top, frame timeline, then threads, scope table and call tree side by side. */
+:root {
+  --bg: #f3f5f8; --panel: #ffffff; --line: #d9dee7; --fg: #1b2330; --muted: #5b6678; --sel: #eef3f8;
+  --accent: #0b7a8f; --accent-soft: #d8eef2; --bar: #7fb6c2;
+  --good: #1f8a4c; --warn: #b7791f; --bad: #c2412d; --info: #2c6fb0;
+  --good-soft: #dff3e7; --warn-soft: #fbefd9; --bad-soft: #f9e0dc; --info-soft: #e1ecf8;
+  --c0: #2f7fb8; --c1: #8b5cb0; --c2: #c99a1e; --c3: #2f9a62; --c4: #c8642f; --c5: #7d8796; --c6: #c94b4b; --c7: #a3acb8; --idle: #e4e9f0;
+  --f-display: "Space Grotesk", "Segoe UI", system-ui, sans-serif;
+  --f-body: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  --f-mono: "IBM Plex Mono", Consolas, "Courier New", monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #11161d; --panel: #18202a; --line: #2b3542; --fg: #e4e9f0; --muted: #94a1b3; --sel: #1f2a36;
+  --accent: #4cc3d6; --accent-soft: #163640; --bar: #2f7f8e;
+  --good: #4fc27f; --warn: #e0a64a; --bad: #f0745f; --info: #6aa8e8;
+  --good-soft: #173526; --warn-soft: #3a2e17; --bad-soft: #3d1f1a; --info-soft: #182a3d;
+  --c0: #5aa7de; --c1: #b48ad6; --c2: #e0b84a; --c3: #55c487; --c4: #e58a55; --c5: #8e99a8; --c6: #ea7272; --c7: #5d6878; --idle: #26303c; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #11161d; --panel: #18202a; --line: #2b3542; --fg: #e4e9f0; --muted: #94a1b3; --sel: #1f2a36;
+  --accent: #4cc3d6; --accent-soft: #163640; --bar: #2f7f8e;
+  --good: #4fc27f; --warn: #e0a64a; --bad: #f0745f; --info: #6aa8e8;
+  --good-soft: #173526; --warn-soft: #3a2e17; --bad-soft: #3d1f1a; --info-soft: #182a3d;
+  --c0: #5aa7de; --c1: #b48ad6; --c2: #e0b84a; --c3: #55c487; --c4: #e58a55; --c5: #8e99a8; --c6: #ea7272; --c7: #5d6878; --idle: #26303c; color-scheme: dark }
+
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--fg); font-family: var(--f-body); font-size: 14px; line-height: 1.5;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); padding-block: 20px 40px; }
+.wrap { max-width: 1280px; margin: 0 auto; display: grid; gap: 16px; }
+h1, h2 { font-family: var(--f-display); text-wrap: balance; margin: 0; }
+h1 { font-size: 1.6rem; letter-spacing: -0.01em; }
+h2 { font-size: 1.05rem; }
+.mono { font-family: var(--f-mono); }
+.num { font-variant-numeric: tabular-nums; font-family: var(--f-mono); }
+.muted { color: var(--muted); }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 16px; min-width: 0; }
+.panel > header { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px 16px; margin-bottom: 12px; }
+.hint { font-size: 0.85rem; color: var(--muted); margin: 0 0 10px; max-width: 75ch; }
+
+/* top bar */
+.top { display: flex; flex-wrap: wrap; gap: 12px 20px; align-items: center; justify-content: space-between; }
+.top p { margin: 4px 0 0; color: var(--muted); max-width: 65ch; }
+.actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.btn { font: 500 0.92rem var(--f-body); background: var(--accent); color: var(--panel); border: 0; border-radius: 6px; padding: 8px 14px; cursor: pointer; }
+.btn.ghost { background: var(--panel); color: var(--fg); border: 1px solid var(--line); }
+.btn:hover { filter: brightness(1.06); }
+.btn kbd { font: 0.75rem var(--f-mono); opacity: 0.75; margin-left: 6px; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+body.dragging .wrap { outline: 3px dashed var(--accent); outline-offset: 8px; border-radius: 8px; }
+.status { font-size: 0.9rem; color: var(--muted); }
+.status.err { color: var(--bad); }
+.copybox { width: 100%; height: 9em; font: 0.85rem var(--f-mono); background: var(--panel); color: var(--fg); border: 1px solid var(--line); border-radius: 6px; padding: 8px; }
+
+.chips { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.chip { font-size: 0.8rem; border: 1px solid var(--line); border-radius: 999px; padding: 2px 10px; background: var(--panel); }
+.chip b { font-weight: 600; }
+.chip.sample { background: var(--accent-soft); border-color: transparent; }
+.chip.slotA { border-color: var(--c0); } .chip.slotB { border-color: var(--c1); }
+.chip button { font: inherit; background: none; border: 0; padding: 0 0 0 4px; cursor: pointer; color: var(--accent); text-decoration: underline; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 999px; overflow: hidden; }
+.seg button { font: 0.8rem var(--f-body); border: 0; background: var(--panel); color: var(--fg); padding: 2px 12px; cursor: pointer; }
+.seg button[aria-pressed="true"] { background: var(--accent); color: var(--panel); }
+
+/* findings */
+.finds { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.finds li { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px; align-items: baseline; }
+.pill { font-size: 0.72rem; font-weight: 600; border-radius: 999px; padding: 1px 9px; white-space: nowrap; }
+.pill.ok { background: var(--good-soft); color: var(--good); } .pill.info { background: var(--info-soft); color: var(--info); }
+.pill.warn { background: var(--warn-soft); color: var(--warn); } .pill.err { background: var(--bad-soft); color: var(--bad); }
+.pill.frm { background: var(--accent-soft); color: var(--accent); }
+
+/* KPIs */
+.targets { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; font-size: 0.85rem; color: var(--muted); }
+.targets input { width: 5.5em; font: inherit; font-family: var(--f-mono); padding: 3px 6px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel); color: var(--fg); }
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+.kpi { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; background: var(--panel); border-left-width: 4px; }
+.kpi .label { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+.kpi .value { font-family: var(--f-mono); font-size: 1.4rem; font-variant-numeric: tabular-nums; }
+.kpi .value small { font-size: 0.8rem; color: var(--muted); }
+.kpi .cmp { font-family: var(--f-mono); font-size: 0.8rem; color: var(--muted); }
+.kpi.good { border-left-color: var(--good); } .kpi.warn { border-left-color: var(--warn); } .kpi.bad { border-left-color: var(--bad); } .kpi.plain { border-left-color: var(--line); }
+.d-good { color: var(--good); } .d-bad { color: var(--bad); } .d-zero { color: var(--muted); }
+
+/* budget + legends */
+.budget { position: relative; display: flex; height: 22px; border-radius: 5px; overflow: hidden; background: var(--idle); }
+.budget span { height: 100%; }
+.budget .over { position: absolute; top: 0; bottom: 0; right: 0; background: repeating-linear-gradient(135deg, var(--bad) 0 5px, transparent 5px 10px); opacity: 0.55; }
+.scale { display: flex; justify-content: space-between; font-size: 0.8rem; color: var(--muted); margin-top: 4px; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 16px; margin-top: 8px; font-size: 0.85rem; }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.sw { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+.b0 { background: var(--c0); } .b1 { background: var(--c1); } .b2 { background: var(--c2); } .b3 { background: var(--c3); }
+.b4 { background: var(--c4); } .b5 { background: var(--c5); } .b6 { background: var(--c6); } .b7 { background: var(--c7); } .bidle { background: var(--idle); border: 1px solid var(--line); }
+
+/* chart */
+.chart { width: 100%; height: 230px; display: block; cursor: pointer; }
+.chart text { fill: var(--muted); font: 11px var(--f-mono); }
+.chart .grid { stroke: var(--line); stroke-width: 1; }
+.chart .f0 { fill: var(--c0); } .chart .f1 { fill: var(--c1); } .chart .f2 { fill: var(--c2); } .chart .f3 { fill: var(--c3); }
+.chart .f4 { fill: var(--c4); } .chart .f5 { fill: var(--c5); } .chart .f6 { fill: var(--c6); } .chart .f7 { fill: var(--c7); } .chart .fidle { fill: var(--idle); }
+.chart .t-avg { stroke: var(--good); stroke-dasharray: 5 4; stroke-width: 1.5; }
+.chart .t-max { stroke: var(--bad); stroke-dasharray: 5 4; stroke-width: 1.5; }
+.chart .selbox { fill: none; stroke: var(--fg); stroke-width: 2; }
+.chart .hit { fill: transparent; }
+.chart .hit:hover { fill: var(--accent); opacity: 0.12; }
+.framebar { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; margin-top: 8px; font-size: 0.9rem; }
+.framebar button { font: inherit; background: var(--panel); color: var(--fg); border: 1px solid var(--line); border-radius: 5px; cursor: pointer; padding: 1px 10px; }
+
+/* tables */
+.scroll { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; }
+th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); font-weight: 600; white-space: nowrap; }
+th button { all: unset; cursor: pointer; }
+th button[aria-sort="descending"]::after { content: " ▼"; color: var(--accent); }
+td.r, th.r { text-align: right; white-space: nowrap; }
+tbody tr:hover { background: var(--sel); }
+.name { font-family: var(--f-mono); font-weight: 500; word-break: break-word; }
+.why { font-size: 0.82rem; color: var(--muted); margin-top: 2px; max-width: 70ch; }
+.why.guess::before { content: "Phỏng đoán · "; font-style: italic; }
+.meter { height: 6px; border-radius: 3px; background: var(--accent-soft); margin-top: 4px; min-width: 60px; }
+.meter > span { display: block; height: 100%; border-radius: 3px; background: var(--accent); }
+.meter.hot > span { background: var(--warn); }
+.tag { font-size: 0.72rem; border-radius: 4px; padding: 1px 6px; background: var(--accent-soft); white-space: nowrap; }
+
+.cols { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); gap: 16px; }
+@media (max-width: 900px) { .cols { grid-template-columns: 1fr; } }
+.controls { display: flex; flex-wrap: wrap; gap: 8px; }
+.controls select, .controls input { font: inherit; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--fg); min-width: 0; }
+.more { margin-top: 10px; }
+.linkbtn { font: inherit; color: var(--accent); background: none; border: 0; padding: 0; cursor: pointer; text-decoration: underline; }
+
+/* tree */
+.tree { font-size: 0.9rem; }
+.tree details { margin-left: 14px; border-left: 1px solid var(--line); padding-left: 8px; }
+.tree > details { margin-left: 0; border-left: 0; padding-left: 0; }
+.tree summary { cursor: pointer; padding: 3px 0; }
+.tree .row { display: inline-flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; }
+.tree .leaf { margin-left: 14px; border-left: 1px solid var(--line); padding: 3px 0 3px 8px; }
+.tree .why { margin: 0 0 2px; }
+
+/* history + glossary */
+.hist { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.hist li { display: flex; flex-wrap: wrap; gap: 4px 14px; align-items: baseline; padding: 6px 0; border-bottom: 1px solid var(--line); }
+.hist li:last-child { border-bottom: 0; }
+.hist button { font: 0.8rem var(--f-body); background: var(--panel); color: var(--fg); border: 1px solid var(--line); border-radius: 5px; padding: 1px 9px; cursor: pointer; }
+dl.gloss { display: grid; grid-template-columns: minmax(0, 16rem) minmax(0, 1fr); gap: 6px 16px; margin: 0; }
+dl.gloss dt { font-family: var(--f-mono); font-weight: 500; word-break: break-word; }
+dl.gloss dd { margin: 0; color: var(--muted); }
+@media (max-width: 600px) { dl.gloss { grid-template-columns: 1fr; } dl.gloss dd { margin-bottom: 8px; } }
+@media (prefers-reduced-motion: no-preference) { .meter > span, .budget span { transition: width .2s; } }
+
+/* standalone page (no host reset) + empty start screen */
+[hidden] { display: none !important; }
+html { color-scheme: light; }
+body { margin: 0; }
+.stack { display: grid; gap: 16px; }
+.empty { display: grid; gap: 14px; justify-items: start; padding: 28px; border: 2px dashed var(--line); background: var(--panel); border-radius: 8px; }
+.empty h2 { font-size: 1.3rem; }
+.empty ol { margin: 0; padding-left: 1.3em; display: grid; gap: 4px; max-width: 70ch; }
+.empty code { font-family: var(--f-mono); font-size: 0.85em; background: var(--accent-soft); padding: 1px 5px; border-radius: 4px; word-break: break-all; }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+  <section class="top">
+    <div>
+      <h1>MicroProfiler Reader</h1>
+      <p>Mở file dump <span class="mono">microprofile-*.x.html</span> (nút Dump trong MicroProfiler, Ctrl+F6). File được đọc ngay trên máy bạn, không tải lên đâu.</p>
+    </div>
+    <div class="actions">
+      <button class="btn" id="kOpen" type="button">Mở dump<kbd>O</kbd></button>
+      <button class="btn ghost" id="kCompare" type="button">Mở dump để so sánh<kbd>B</kbd></button>
+      <button class="btn ghost" id="kCopy" type="button">Chép tóm tắt<kbd>C</kbd></button>
+      <input type="file" id="fileA" accept=".html,.htm,.txt" hidden>
+      <input type="file" id="fileB" accept=".html,.htm,.txt" hidden>
+    </div>
+  </section>
+  <div class="status" id="msg" aria-live="polite">Kéo thả file dump vào trang, hoặc bấm "Mở dump".</div>
+  <textarea class="copybox" id="copybox" hidden readonly aria-label="Tóm tắt để sao chép"></textarea>
+  <div class="chips" id="status"></div>
+
+  <section class="empty" id="empty">
+    <h2>Thả file dump vào đây để bắt đầu</h2>
+    <ol>
+      <li>Trong Roblox (Client hoặc Studio) bấm <b>Ctrl+F6</b> để mở MicroProfiler.</li>
+      <li>Đứng ở chỗ muốn đo vài giây, rồi bấm <b>Dump</b> trên thanh menu của MicroProfiler.</li>
+      <li>File được lưu ở <code>%LOCALAPPDATA%\Roblox\logs\microprofile-*.x.html</code>. Kéo nó vào trang này, hoặc bấm nút bên dưới.</li>
+    </ol>
+    <button class="btn" id="kOpenEmpty" type="button">Mở file dump…</button>
+    <p class="hint">Muốn so sánh trước/sau: mở dump thứ nhất, rồi bấm "Mở dump để so sánh" cho dump thứ hai (hoặc kéo cả hai file vào cùng lúc).</p>
+  </section>
+
+  <div class="stack" id="data" hidden>
+  <section class="panel">
+    <header><h2>Phát hiện</h2></header>
+    <p class="hint">Những gì app tự nhận ra trong dump, kèm gợi ý xử lý.</p>
+    <ul class="finds" id="findings"></ul>
+  </section>
+
+  <section class="panel">
+    <header>
+      <h2>Tổng quan frame</h2>
+      <div class="targets">
+        <label for="tAvg">Mục tiêu trung bình &lt;</label><input id="tAvg" type="number" step="0.5" min="1" value="10"> ms
+        <label for="tMax">Trần &le;</label><input id="tMax" type="number" step="0.5" min="1" value="12"> ms
+      </div>
+    </header>
+    <p class="hint" id="statsHint"></p>
+    <div class="kpis" id="stats"></div>
+  </section>
+
+  <section class="panel">
+    <header><h2>Ngân sách frame của RBX Main</h2></header>
+    <p class="hint">Một frame trung bình của luồng Main chia theo nhóm việc, so với mục tiêu trung bình. Phần gạch đỏ là vượt mục tiêu.</p>
+    <div class="budget" id="budget" role="img"></div>
+    <div class="scale" id="budgetScale"></div>
+    <div class="legend" id="budgetLegend"></div>
+  </section>
+
+  <section class="panel">
+    <header><h2>Thời gian từng frame</h2></header>
+    <p class="hint">Mỗi cột là một frame, chia màu theo nhóm việc trên Main; phần nhạt là lúc Main rảnh. Bấm vào cột để xem riêng frame đó (phím ← → để chuyển, Esc để bỏ chọn).</p>
+    <svg class="chart" id="chart" role="img" aria-label="Biểu đồ thời gian từng frame"></svg>
+    <div class="legend" id="chartLegend"></div>
+    <div class="framebar" id="framebar"></div>
+  </section>
+
+  <section class="panel">
+    <header><h2>Các luồng</h2></header>
+    <p class="hint">Thời gian bận mỗi frame, đã trừ lúc ngủ (<span class="mono">Sleep</span>). Luồng nào gần bằng thời gian frame là luồng đang giữ chân FPS, thường là <span class="mono">RBX Main</span>.</p>
+    <div class="scroll"><table id="threads"></table></div>
+  </section>
+
+  <div class="cols">
+    <section class="panel">
+      <header>
+        <h2 id="topCmd">Scope tốn thời gian</h2>
+        <div class="controls">
+          <select id="thread" aria-label="Chọn luồng"></select>
+          <input id="search" type="search" placeholder="Tìm scope… (phím /)" aria-label="Tìm scope">
+        </div>
+      </header>
+      <p class="hint">Self = thời gian của riêng scope đó. Gồm con = tính cả scope bên trong. Lần/frame = số lần chạy mỗi frame.</p>
+      <div class="scroll"><table id="scopes"></table></div>
+      <div class="more" id="more"></div>
+    </section>
+    <section class="panel">
+      <header><h2 id="treeCmd">Cây lời gọi</h2></header>
+      <p class="hint">Scope nào nằm trong scope nào. Bấm để mở/gập. Thanh màu là phần trăm của frame trung bình.</p>
+      <div class="tree" id="tree"></div>
+    </section>
+  </div>
+  </div>
+
+  <section class="panel">
+    <header><h2>Dump đã mở gần đây</h2></header>
+    <p class="hint">Lưu bản tóm tắt trong trình duyệt này để so sánh nhanh. Muốn xem cây lời gọi hoặc từng frame thì mở lại file gốc.</p>
+    <ul class="hist" id="history"></ul>
+  </section>
+
+  <section class="panel">
+    <header><h2>Từ điển scope</h2></header>
+    <p class="hint">Giải thích các tên thường gặp. Mục ghi "Phỏng đoán" là rút ra khi đo thực tế, tài liệu Roblox chưa mô tả.</p>
+    <dl class="gloss" id="man"></dl>
+  </section>
+</div>
+
+<script src="mp-core.js" charset="utf-8"></script>
+<script src="glossary.js" charset="utf-8"></script>
+<script src="app.js" charset="utf-8"></script>
+</body>
+</html>
